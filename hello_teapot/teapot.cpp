@@ -1,3 +1,4 @@
+// teapot.cpp
 /*
 Copyright (c) 2012, Broadcom Europe Ltd
 Copyright (c) 2012, OtherCrashOverride
@@ -26,8 +27,6 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-// A rotating cube rendered with OpenGL|ES. Three images used as textures on the cube faces.
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,31 +40,30 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "EGL/egl.h"
 #include "EGL/eglext.h"
 
-#include "cube_texture_and_coords.h"
+extern "C" {
 #include "models.h"
-#include "triangle.h"
-#include <pthread.h>
+#include "../common/cube_texture_and_coords.h"
+void startVideoThread( EGLDisplay dpy, EGLContext ctx, EGLClientBuffer buffer );
+void killVideoThread();
+}
 
-
-#define PATH "./"
-
-#define IMAGE_SIZE_WIDTH 1920
-#define IMAGE_SIZE_HEIGHT 1080
+#define IMAGE_WIDTH 1920
+#define IMAGE_HEIGHT 1080
 
 #ifndef M_PI
    #define M_PI 3.141592654
 #endif
-  
+
 
 typedef struct
 {
    uint32_t screen_width;
    uint32_t screen_height;
-// OpenGL|ES objects
+
    EGLDisplay display;
    EGLSurface surface;
    EGLContext context;
-   GLuint tex;
+
 // model rotation vector and direction
    GLfloat rot_angle_x_inc;
    GLfloat rot_angle_y_inc;
@@ -77,229 +75,47 @@ typedef struct
 // current distance from camera
    GLfloat distance;
    GLfloat distance_inc;
+
+   GLuint tex;
    MODEL_T model;
 } CUBE_STATE_T;
 
-static void init_ogl(CUBE_STATE_T *state);
-static void init_model_proj(CUBE_STATE_T *state);
-static void reset_model(CUBE_STATE_T *state);
-static GLfloat inc_and_wrap_angle(GLfloat angle, GLfloat angle_inc);
-static GLfloat inc_and_clip_distance(GLfloat distance, GLfloat distance_inc);
-static void redraw_scene(CUBE_STATE_T *state);
-static void update_model(CUBE_STATE_T *state);
-static void init_textures(CUBE_STATE_T *state);
-static void exit_func(void);
-static volatile int terminate;
 static CUBE_STATE_T _state, *state=&_state;
 
-static void* eglImage = 0;
-static pthread_t thread1;
+#include "../common/init_ogl.h"
 
+/////////////////////////////////////////////////////////////////////////////
 
-/***********************************************************
- * Name: init_ogl
- *
- * Arguments:
- *       CUBE_STATE_T *state - holds OGLES model info
- *
- * Description: Sets the display, OpenGL|ES context and screen stuff
- *
- * Returns: void
- *
- ***********************************************************/
-static void init_ogl(CUBE_STATE_T *state)
-{
-   int32_t success = 0;
-   EGLBoolean result;
-   EGLint num_config;
-
-   static EGL_DISPMANX_WINDOW_T nativewindow;
-
-   DISPMANX_ELEMENT_HANDLE_T dispman_element;
-   DISPMANX_DISPLAY_HANDLE_T dispman_display;
-   DISPMANX_UPDATE_HANDLE_T dispman_update;
-   VC_RECT_T dst_rect;
-   VC_RECT_T src_rect;
-
-   static const EGLint attribute_list[] =
-   {
-      EGL_RED_SIZE, 8,
-      EGL_GREEN_SIZE, 8,
-      EGL_BLUE_SIZE, 8,
-      EGL_ALPHA_SIZE, 8,
-      EGL_DEPTH_SIZE, 16,
-      EGL_SAMPLES, 4,
-      EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-      EGL_NONE
-   };
-   
-   EGLConfig config;
-
-   // get an EGL display connection
-   state->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-   assert(state->display!=EGL_NO_DISPLAY);
-
-   // initialize the EGL display connection
-   result = eglInitialize(state->display, NULL, NULL);
-   assert(EGL_FALSE != result);
-
-   // get an appropriate EGL frame buffer configuration
-   // this uses a BRCM extension that gets the closest match, rather than standard which returns anything that matches
-   result = eglSaneChooseConfigBRCM(state->display, attribute_list, &config, 1, &num_config);
-   assert(EGL_FALSE != result);
-
-   // create an EGL rendering context
-   state->context = eglCreateContext(state->display, config, EGL_NO_CONTEXT, NULL);
-   assert(state->context!=EGL_NO_CONTEXT);
-
-   // create an EGL window surface
-   success = graphics_get_display_size(0 /* LCD */, &state->screen_width, &state->screen_height);
-   assert( success >= 0 );
-
-   dst_rect.x = 0;
-   dst_rect.y = 0;
-   dst_rect.width = state->screen_width;
-   dst_rect.height = state->screen_height;
-      
-   src_rect.x = 0;
-   src_rect.y = 0;
-   src_rect.width = state->screen_width << 16;
-   src_rect.height = state->screen_height << 16;        
-
-   dispman_display = vc_dispmanx_display_open( 0 /* LCD */);
-   dispman_update = vc_dispmanx_update_start( 0 );
-         
-   dispman_element = vc_dispmanx_element_add ( dispman_update, dispman_display,
-      0/*layer*/, &dst_rect, 0/*src*/,
-      &src_rect, DISPMANX_PROTECTION_NONE, 0 /*alpha*/, 0/*clamp*/, 0/*transform*/);
-      
-   nativewindow.element = dispman_element;
-   nativewindow.width = state->screen_width;
-   nativewindow.height = state->screen_height;
-   vc_dispmanx_update_submit_sync( dispman_update );
-      
-   state->surface = eglCreateWindowSurface( state->display, config, &nativewindow, NULL );
-   assert(state->surface != EGL_NO_SURFACE);
-
-   // connect the context to the surface
-   result = eglMakeCurrent(state->display, state->surface, state->surface, state->context);
-   assert(EGL_FALSE != result);
-
-   // Set background color and clear buffers
-   glClearColor((0.3922f+7*0.5f)/8, (0.1176f+7*0.5f)/8, (0.5882f+7*0.5f)/8, 1.0f);
-
-   // Enable back face culling.
-   glEnable(GL_CULL_FACE);
-
-   glEnable(GL_DEPTH_TEST);
-   glClearDepthf(1.0);
-   glDepthFunc(GL_LEQUAL);
-
-   float noAmbient[] = {1.0f, 1.0f, 1.0f, 1.0f};
-   glLightfv(GL_LIGHT0, GL_AMBIENT, noAmbient);
-   glEnable(GL_LIGHT0);
-   glEnable(GL_LIGHTING);
-}
-
-/***********************************************************
- * Name: init_model_proj
- *
- * Arguments:
- *       CUBE_STATE_T *state - holds OGLES model info
- *
- * Description: Sets the OpenGL|ES model to default values
- *
- * Returns: void
- *
- ***********************************************************/
-static void init_model_proj(CUBE_STATE_T *state)
+static void init_projection(CUBE_STATE_T *state)
 {
    float nearp = 0.1f;
    float farp = 500.0f;
-   float hht;
-   float hwd;
+   float hht = nearp * (float)tan(45.0 / 2.0 / 180.0 * M_PI);
+   float hwd = hht * (float)state->screen_width / (float)state->screen_height;
 
-   glHint( GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST );
-
-   glViewport(0, 0, (GLsizei)state->screen_width, (GLsizei)state->screen_height);
-      
    glMatrixMode(GL_PROJECTION);
    glLoadIdentity();
-
-   hht = nearp * (float)tan(45.0 / 2.0 / 180.0 * M_PI);
-   hwd = hht * (float)state->screen_width / (float)state->screen_height;
-
    glFrustumf(-hwd, hwd, -hht, hht, nearp, farp);
-   
-   glEnableClientState( GL_VERTEX_ARRAY );
-
-   reset_model(state);
 }
 
-/***********************************************************
- * Name: reset_model
- *
- * Arguments:
- *       CUBE_STATE_T *state - holds OGLES model info
- *
- * Description: Resets the Model projection and rotation direction
- *
- * Returns: void
- *
- ***********************************************************/
+/////////////////////////////////////////////////////////////////////////////
+
 static void reset_model(CUBE_STATE_T *state)
 {
-   // reset model position
    glMatrixMode(GL_MODELVIEW);
+   glLoadIdentity();
 
-   // reset model rotation
-   state->rot_angle_x = 45.f; state->rot_angle_y = 30.f; state->rot_angle_z = 0.f;
-   state->rot_angle_x_inc = 0.5f; state->rot_angle_y_inc = 0.5f; state->rot_angle_z_inc = 0.f;
+   state->rot_angle_x = 45.f;
+   state->rot_angle_y = 30.f;
+   state->rot_angle_z = 0.f;
+   state->rot_angle_x_inc = 0.5f;
+   state->rot_angle_y_inc = 0.5f;
+   state->rot_angle_z_inc = 0.f;
    state->distance = 1.2f*1.5f;
 }
 
-/***********************************************************
- * Name: update_model
- *
- * Arguments:
- *       CUBE_STATE_T *state - holds OGLES model info
- *
- * Description: Updates model projection to current position/rotation
- *
- * Returns: void
- *
- ***********************************************************/
-static void update_model(CUBE_STATE_T *state)
-{
-   // update position
-   state->rot_angle_x = inc_and_wrap_angle(state->rot_angle_x, state->rot_angle_x_inc);
-   state->rot_angle_y = inc_and_wrap_angle(state->rot_angle_y, state->rot_angle_y_inc);
-   state->rot_angle_z = inc_and_wrap_angle(state->rot_angle_z, state->rot_angle_z_inc);
-   state->distance    = inc_and_clip_distance(state->distance, state->distance_inc);
+/////////////////////////////////////////////////////////////////////////////
 
-   glLoadIdentity();
-   // move camera back to see the cube
-   glTranslatef(0.f, 0.f, -state->distance);
-
-   // Rotate model to new position
-   glRotatef(state->rot_angle_x, 1.f, 0.f, 0.f);
-   glRotatef(state->rot_angle_y, 0.f, 1.f, 0.f);
-   glRotatef(state->rot_angle_z, 0.f, 0.f, 1.f);
-}
-
-/***********************************************************
- * Name: inc_and_wrap_angle
- *
- * Arguments:
- *       GLfloat angle     current angle
- *       GLfloat angle_inc angle increment
- *
- * Description:   Increments or decrements angle by angle_inc degrees
- *                Wraps to 0 at 360 deg.
- *
- * Returns: new value of angle
- *
- ***********************************************************/
 static GLfloat inc_and_wrap_angle(GLfloat angle, GLfloat angle_inc)
 {
    angle += angle_inc;
@@ -312,19 +128,6 @@ static GLfloat inc_and_wrap_angle(GLfloat angle, GLfloat angle_inc)
    return angle;
 }
 
-/***********************************************************
- * Name: inc_and_clip_distance
- *
- * Arguments:
- *       GLfloat distance     current distance
- *       GLfloat distance_inc distance increment
- *
- * Description:   Increments or decrements distance by distance_inc units
- *                Clips to range
- *
- * Returns: new value of angle
- *
- ***********************************************************/
 static GLfloat inc_and_clip_distance(GLfloat distance, GLfloat distance_inc)
 {
    distance += distance_inc;
@@ -337,127 +140,101 @@ static GLfloat inc_and_clip_distance(GLfloat distance, GLfloat distance_inc)
    return distance;
 }
 
-/***********************************************************
- * Name: redraw_scene
- *
- * Arguments:
- *       CUBE_STATE_T *state - holds OGLES model info
- *
- * Description:   Draws the model and calls eglSwapBuffers
- *                to render to screen
- *
- * Returns: void
- *
- ***********************************************************/
+/////////////////////////////////////////////////////////////////////////////
+
+static void update_model(CUBE_STATE_T *state)
+{
+   state->rot_angle_x = inc_and_wrap_angle(state->rot_angle_x, state->rot_angle_x_inc);
+   state->rot_angle_y = inc_and_wrap_angle(state->rot_angle_y, state->rot_angle_y_inc);
+   state->rot_angle_z = inc_and_wrap_angle(state->rot_angle_z, state->rot_angle_z_inc);
+   state->distance    = inc_and_clip_distance(state->distance, state->distance_inc);
+
+   glLoadIdentity();
+   glTranslatef(0.f, 0.f, -state->distance);
+
+   glRotatef(state->rot_angle_x, 1.f, 0.f, 0.f);
+   glRotatef(state->rot_angle_y, 0.f, 1.f, 0.f);
+   glRotatef(state->rot_angle_z, 0.f, 0.f, 1.f);
+}
+
+/////////////////////////////////////////////////////////////////////////////
+
 static void redraw_scene(CUBE_STATE_T *state)
 {
-   // Start with a clear screen
    glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
-
    draw_wavefront(state->model, state->tex);
-
    eglSwapBuffers(state->display, state->surface);
 }
 
-/***********************************************************
- * Name: init_textures
- *
- * Arguments:
- *       CUBE_STATE_T *state - holds OGLES model info
- *
- * Description:   Initialise OGL|ES texture surfaces to use image
- *                buffers
- *
- * Returns: void
- *
- ***********************************************************/
+/////////////////////////////////////////////////////////////////////////////
+
 static void init_textures(CUBE_STATE_T *state)
 {
-   // the texture containing the video
    glGenTextures(1, &state->tex);
-
    glBindTexture(GL_TEXTURE_2D, state->tex);
-   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, IMAGE_SIZE_WIDTH, IMAGE_SIZE_HEIGHT, 0,
-                GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, IMAGE_WIDTH, IMAGE_HEIGHT,
+       0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-   /* Create EGL Image */
-   eglImage = eglCreateImageKHR(
-                state->display,
-                state->context,
-                EGL_GL_TEXTURE_2D_KHR,
-                (EGLClientBuffer)state->tex,
-                0);
-    
-   if (eglImage == EGL_NO_IMAGE_KHR)
-   {
-      printf("eglCreateImageKHR failed.\n");
-      exit(1);
-   }
-
-   // Start rendering
-   pthread_create(&thread1, NULL, video_decode_test, eglImage);
-
-   // setup overall texture environment
-   glTexCoordPointer(2, GL_FLOAT, 0, texCoords);
-   glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-
-   glEnable(GL_TEXTURE_2D);
-
-   // Bind texture surface to current vertices
-   glBindTexture(GL_TEXTURE_2D, state->tex);
+    startVideoThread( state->display, state->context, (EGLClientBuffer)state->tex );
 }
-//------------------------------------------------------------------------------
+
+/////////////////////////////////////////////////////////////////////////////
 
 static void exit_func(void)
-// Function to be passed to atexit().
 {
-   if (eglImage != 0)
-   {
-      if (!eglDestroyImageKHR(state->display, (EGLImageKHR) eglImage))
-         printf("eglDestroyImageKHR failed.");
-   }
+    killVideoThread();
 
-   // clear screen
-   glClear( GL_COLOR_BUFFER_BIT );
-   eglSwapBuffers(state->display, state->surface);
-
-   // Release OpenGL resources
    eglMakeCurrent( state->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT );
    eglDestroySurface( state->display, state->surface );
    eglDestroyContext( state->display, state->context );
    eglTerminate( state->display );
+}
 
-   printf("\ncube closed\n");
-} // exit_func()
-
-//==============================================================================
+/////////////////////////////////////////////////////////////////////////////
 
 int main ()
 {
    bcm_host_init();
-   printf("Note: ensure you have sufficient gpu_mem configured\n");
 
-   // Clear application state
    memset( state, 0, sizeof( *state ) );
-      
-   // Start OGLES
-   init_ogl(state);
 
-   // Setup the model world
-   init_model_proj(state);
+   init_ogl( state, false );
+   init_projection(state);
+   reset_model(state);
 
-   // initialise the OGLES texture(s)
    init_textures(state);
 
-   //state->model = cube_wavefront();
-   state->model = load_wavefront("/opt/vc/src/hello_pi/hello_teapot/teapot.obj.dat", NULL);
+   state->model = load_wavefront("./teapot.obj.dat", NULL);
 
-   while (!terminate)
+   glEnable(GL_DEPTH_TEST);
+   glClearDepthf(1.0);
+   glDepthFunc(GL_LEQUAL);
+
+   glTexCoordPointer(2, GL_FLOAT, 0, texCoords);
+
+   glEnableClientState( GL_VERTEX_ARRAY );
+   glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+
+   glEnable(GL_TEXTURE_2D);
+   glBindTexture(GL_TEXTURE_2D, state->tex);
+
+   float noAmbient[] = {1.0f, 1.0f, 1.0f, 1.0f};
+   glLightfv(GL_LIGHT0, GL_AMBIENT, noAmbient);
+   glEnable(GL_LIGHT0);
+   glEnable(GL_LIGHTING);
+
+   glClearColor(0.15f, 0.25f, 0.35f, 0.0f);
+   glEnable(GL_CULL_FACE);
+   glHint( GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST );
+
+    glViewport( 0, 0, state->screen_width, state->screen_height);
+
+   while (1)
    {
       update_model(state);
       redraw_scene(state);
@@ -465,4 +242,3 @@ int main ()
    exit_func();
    return 0;
 }
-

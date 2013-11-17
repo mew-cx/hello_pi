@@ -1,4 +1,4 @@
-OBJS=triangle.o video.o
+OBJS=videocube.o ../common/video_decode.o
 BIN=hello_videocube.bin
 LDFLAGS+=-lilclient
 

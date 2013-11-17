@@ -1,4 +1,4 @@
-OBJS=triangle.o video.o models.o
+OBJS=teapot.o ../common/video_decode.o models.o
 BIN=hello_teapot.bin
 LDFLAGS+=-lilclient
 
